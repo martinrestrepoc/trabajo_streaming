@@ -1,0 +1,39 @@
+# ============================================================
+# Kafka en modo KRaft (sin Zookeeper): un solo contenedor, simple de levantar.
+#
+# Uso:
+#   docker compose up -d      -> levanta Kafka
+#   docker compose ps         -> verifica que esté "Up"
+#   docker compose down       -> apaga Kafka
+#
+# Kafka queda escuchando en:
+#   - localhost:9092   (para clientes en TU máquina: Python, Spark en Colab local)
+#   - kafka:29092      (para otros contenedores en la misma red)
+# ============================================================
+
+services:
+  kafka:
+    image: apache/kafka:3.7.0
+    container_name: trabajo_kafka
+    hostname: kafka
+    ports:
+      - "9092:9092"
+    environment:
+      # --- Modo KRaft (Kafka sin Zookeeper) ---
+      KAFKA_NODE_ID: 1
+      KAFKA_PROCESS_ROLES: "broker,controller"
+      KAFKA_CONTROLLER_QUORUM_VOTERS: "1@kafka:29093"
+      KAFKA_CONTROLLER_LISTENER_NAMES: "CONTROLLER"
+
+      # --- Listeners: uno interno (contenedores) y uno externo (tu máquina) ---
+      KAFKA_LISTENERS: "PLAINTEXT://0.0.0.0:29092,CONTROLLER://0.0.0.0:29093,PLAINTEXT_HOST://0.0.0.0:9092"
+      KAFKA_ADVERTISED_LISTENERS: "PLAINTEXT://kafka:29092,PLAINTEXT_HOST://localhost:9092"
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: "CONTROLLER:PLAINTEXT,PLAINTEXT:PLAINTEXT,PLAINTEXT_HOST:PLAINTEXT"
+      KAFKA_INTER_BROKER_LISTENER_NAME: "PLAINTEXT"
+
+      # --- Config mínima para un solo nodo ---
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
+      KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS: 0
+      CLUSTER_ID: "MkU3OEVBNTcwNTJENDM2Qk"

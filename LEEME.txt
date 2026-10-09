@@ -1,0 +1,22 @@
+============================================================
+ Trabajo 3 - Productores de Kafka (EN PAREJAS)
+============================================================
+
+Aquí están los 3 productores, uno por caso. Elijan UNO según el caso
+que decidan hacer (ver enunciado):
+
+  productor_flota.py       -> Caso A: flota de vehículos     (topic: flota)
+  productor_ecommerce.py   -> Caso B: e-commerce en vivo     (topic: ecommerce)
+  productor_precios.py     -> Caso C: precios acciones/cripto (topic: precios)
+
+NO modifiquen el productor: es su fuente de datos.
+
+PASOS:
+1. Levanten Kafka:
+2. Creen el topic de su caso
+3. Instalen librerías como Kafka-python pyspark
+4. Arranquen el productor de su caso:
+5. Escriban SU detector con Spark que lea de ese topic y aplique las 3 reglas.
+
+Spark y Kafka deben estar en la MISMA máquina.
+============================================================
