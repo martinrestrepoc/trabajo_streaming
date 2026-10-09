@@ -100,18 +100,18 @@ consulta_velocidad = (
 # anterior del mismo vehículo. Se genera alerta cuando la caida es mayor a 2.
 
 # Una lectura por vehículo, guardada en memoria entre batches.
-# Ejemplo para reportes en orden y sin duplicados; se reinicia con el programa.
 ultimas_lecturas_combustible = []
 
 
 def revisar_combustible(lote, batch_id):
-    global ultimas_lecturas_combustible
+    global ultimas_lecturas_combustible # Para actualizar la lista definida fuera de la función.
     sesion = lote.sparkSession
-    datos = lote.select("id_vehiculo", "timestamp", "combustible")
-    datos.createOrReplaceTempView("lote_actual")
+    datos = lote.select("id_vehiculo", "timestamp", "combustible") # Solo las columnas necesarias.
+    datos.createOrReplaceTempView("lote_actual") # Las lecturas nuevas que llegaron en ese batch.
+    # La última lectura guardada de cada vehículo del procesamiento anterior.
     sesion.createDataFrame(ultimas_lecturas_combustible, datos.schema).createOrReplaceTempView("ultima_lectura")
 
-    # 1. Unir el historial con las lecturas nuevas.
+    # 1. Unir las lecturas anteriores con las nuevas
     sesion.sql("""
         SELECT * FROM ultima_lectura
         UNION ALL
@@ -119,6 +119,9 @@ def revisar_combustible(lote, batch_id):
     """).createOrReplaceTempView("lecturas_combustible")
 
     # 2. Comparar con la lectura anterior y mostrar caídas mayores a 2.
+    # Ejecuta la consulta y guarda el resultado en un DataFrame.
+
+    # LAG copia el valor de combustible de la fila anterior (según el orden por timestamp) para cada vehículo.
     alertas = sesion.sql("""
         WITH comparaciones AS (
             SELECT *, LAG(combustible) OVER (
@@ -133,7 +136,7 @@ def revisar_combustible(lote, batch_id):
     """)
     mostrar_alertas("Combustible", alertas, batch_id)
 
-    # 3. Conservar solo la última lectura de cada vehículo para el próximo batch.
+    # 3. Conservar solo la última lectura de cada vehículo para el próximo batch en una lista.
     ultimas_lecturas_combustible = sesion.sql("""
         WITH ordenadas AS (
             SELECT *, ROW_NUMBER() OVER (
@@ -144,13 +147,14 @@ def revisar_combustible(lote, batch_id):
         SELECT id_vehiculo, timestamp, combustible
         FROM ordenadas
         WHERE posicion = 1
-    """).collect()
+    """).collect() # Ejecuta la consulta y devuelve sus filas como una lista de objetos Row de Python.
 
 
 consulta_combustible = (
-    spark.table("flota").writeStream
-    .foreachBatch(revisar_combustible)
-    .start()
+    spark.table("flota") # obtiene como DataFrame la vista flota.
+    .writeStream # prepara la escritura de streaming.
+    .foreachBatch(revisar_combustible) # Spark llama a la funcion y le pasa los parametros.
+    .start() # Spark arranca a procesar los datos disponibles y llama a la función para cada batch.
 )
 
 #6. VEHÍCULO EN SILENCIO
