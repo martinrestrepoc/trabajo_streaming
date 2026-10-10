@@ -60,3 +60,5 @@ Se detecta rápido, en aproximadamente 10 a 12 segundos. Este umbral es ideal po
 ![alt text](img/productor.png)
 
 ![alt text](img/consumidor.png)
+
+![alt text](img/consumidor2.png)
