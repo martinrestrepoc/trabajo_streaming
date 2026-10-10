@@ -1,13 +1,29 @@
+import os
+import sys
+
+# Asegurar que en Windows las rutas con espacios no rompan los workers de Python en Spark
+if sys.platform == "win32":
+    import ctypes
+    _buf = ctypes.create_unicode_buffer(260)
+    if ctypes.windll.kernel32.GetShortPathNameW(sys.executable, _buf, 260) > 0:
+        _py = _buf.value
+    else:
+        _py = sys.executable
+    os.environ["PYSPARK_PYTHON"] = _py
+    os.environ["PYSPARK_DRIVER_PYTHON"] = _py
+
 from pyspark.sql import SparkSession
 from pyspark.sql import functions as F
 from pyspark.sql.types import StructType, StringType, DoubleType
 from threading import Lock
 
-# Evita que las dos consultas mezclen sus encabezados y tablas en la consola.
+# Evita que las consultas mezclen sus encabezados y tablas en la consola.
 salida_consola = Lock()
 
 
 def mostrar_alertas(nombre, lote, batch_id):
+    if lote.isEmpty():
+        return
     with salida_consola:
         print("\n" + "-" * 50)
         print(f"{nombre} — batch {batch_id}")
@@ -27,6 +43,7 @@ spark = (SparkSession.builder
             # Carga el conector que permite a Spark trabajar con Kafka.
          .config("spark.sql.shuffle.partitions","4")
          .config("spark.ui.showConsoleProgress", "false") # Desactiva la barra de progreso en la consola.
+         .config("spark.python.worker.reuse", "false") # Evita problemas de conexión en Windows
          .getOrCreate()) # Obtiene una sesión existente o crea una nueva.
 spark.sparkContext.setLogLevel("ERROR")
 
@@ -69,7 +86,6 @@ tx.createOrReplaceTempView("flota")
 # alertar cuando un vehículo supera los 100 km/h en 3 o más lecturas dentro de 
 # una ventana de tiempo (no un pico aislado, sino sostenido).
 
-
 sql_velocidad = """
     SELECT
         id_vehiculo,
@@ -108,15 +124,17 @@ def revisar_combustible(lote, batch_id):
     sesion = lote.sparkSession
     datos = lote.select("id_vehiculo", "timestamp", "combustible") # Solo las columnas necesarias.
     datos.createOrReplaceTempView("lote_actual") # Las lecturas nuevas que llegaron en ese batch.
-    # La última lectura guardada de cada vehículo del procesamiento anterior.
-    sesion.createDataFrame(ultimas_lecturas_combustible, datos.schema).createOrReplaceTempView("ultima_lectura")
 
     # 1. Unir las lecturas anteriores con las nuevas
-    sesion.sql("""
-        SELECT * FROM ultima_lectura
-        UNION ALL
-        SELECT * FROM lote_actual
-    """).createOrReplaceTempView("lecturas_combustible")
+    if ultimas_lecturas_combustible:
+        sesion.createDataFrame(ultimas_lecturas_combustible, datos.schema).createOrReplaceTempView("ultima_lectura")
+        sesion.sql("""
+            SELECT * FROM ultima_lectura
+            UNION ALL
+            SELECT * FROM lote_actual
+        """).createOrReplaceTempView("lecturas_combustible")
+    else:
+        datos.createOrReplaceTempView("lecturas_combustible")
 
     # 2. Comparar con la lectura anterior y mostrar caídas mayores a 2.
     # Ejecuta la consulta y guarda el resultado en un DataFrame.
@@ -158,13 +176,72 @@ consulta_combustible = (
 )
 
 #6. VEHÍCULO EN SILENCIO
+# alertar cuando un vehículo deja de emitir telemetría (posible falla o accidente).
+# Pista: rastreen la última emisión de cada vehículo. Se alerta si la inactividad supera 10 segundos.
 
-print("Detectores de velocidad y combustible corriendo. Ctrl+C para detener.")
+ultimas_emisiones = {} # Guarda la última emisión y posición conocida de cada vehículo: {id: (ts, lat, lon)}
+UMBRAL_SILENCIO_SEGUNDOS = 10.0 # Telemetría normal llega cada 1s; 10s indica silencio crítico.
+
+def revisar_silencio(lote, batch_id):
+    global ultimas_emisiones
+    sesion = lote.sparkSession
+
+    # 1. Obtener la última emisión y coordenadas de cada vehículo presente en el lote actual
+    recientes = (lote.select("id_vehiculo", "timestamp", "lat", "lon")
+                 .groupBy("id_vehiculo")
+                 .agg(F.max("timestamp").alias("max_ts"),
+                      F.last("lat").alias("lat"),
+                      F.last("lon").alias("lon"))
+                 .collect())
+
+    tiempo_actual = None
+    for r in recientes:
+        ultimas_emisiones[r.id_vehiculo] = (r.max_ts, r.lat, r.lon)
+        if tiempo_actual is None or r.max_ts > tiempo_actual:
+            tiempo_actual = r.max_ts
+
+    if not tiempo_actual or not ultimas_emisiones:
+        return
+
+    # 2. Comparar el tiempo actual del flujo contra la última emisión de cada vehículo
+    alertas_silencio = []
+    for v_id, (ts, lat, lon) in ultimas_emisiones.items():
+        segundos_inactivo = (tiempo_actual - ts).total_seconds()
+        if segundos_inactivo >= UMBRAL_SILENCIO_SEGUNDOS:
+            alertas_silencio.append((
+                v_id,
+                ts.strftime("%Y-%m-%d %H:%M:%S") if hasattr(ts, "strftime") else str(ts),
+                round(segundos_inactivo, 1),
+                lat,
+                lon
+            ))
+
+    # 3. Mostrar alertas si hay vehículos mudos
+    if alertas_silencio:
+        esquema_silencio = (StructType()
+                            .add("id_vehiculo", StringType())
+                            .add("ultimo_contacto", StringType())
+                            .add("segundos_en_silencio", DoubleType())
+                            .add("lat", DoubleType())
+                            .add("lon", DoubleType()))
+        df_silencio = sesion.createDataFrame(alertas_silencio, esquema_silencio)
+        mostrar_alertas("Silencio", df_silencio, batch_id)
+
+
+consulta_silencio = (
+    spark.table("flota")
+    .writeStream
+    .foreachBatch(revisar_silencio)
+    .start()
+)
+
+print("Detectores de velocidad, combustible y silencio corriendo. Ctrl+C para detener.")
 try:
     spark.streams.awaitAnyTermination()
 except KeyboardInterrupt:
     pass
 finally:
+    consulta_silencio.stop()
     consulta_combustible.stop()
     consulta_velocidad.stop()
     spark.stop()
